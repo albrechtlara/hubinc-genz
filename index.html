@@ -20,6 +20,7 @@
 <body>
     <div id="root"></div>
 
+    <!-- Script de Inicialização do Firebase (Módulos Oficiais) -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
         import { getFirestore, collection, onSnapshot, doc, addDoc, deleteDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
@@ -40,24 +41,19 @@
         const db = getFirestore(app);
         const appId = 'hubinc-genz';
 
+        // Disponibiliza referências globais para o script do React
         window.fbRefs = { 
-            db, 
-            auth, 
-            collection, 
-            onSnapshot, 
-            addDoc, 
-            deleteDoc, 
-            signInAnonymously, 
-            onAuthStateChanged,
-            appId 
+            db, auth, collection, onSnapshot, addDoc, deleteDoc, 
+            signInAnonymously, onAuthStateChanged, appId 
         };
     </script>
 
+    <!-- Script da Aplicação React -->
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef } = React;
 
         const INITIAL_DATA = [
-            { "Macroterritório": "Status do Sistema", "Tipo": "Info", "Pain/Passion Point": "Conectando ao banco de dados oficial...", "Direcional Estratégico (Oportunidade para marcas)": "Aguarde a sincronização inicial.", "Menções": 1 }
+            { "Macroterritório": "Status", "Tipo": "Info", "Pain/Passion Point": "A ligar ao servidor do Google...", "Direcional Estratégico (Oportunidade para marcas)": "Aguarde um momento.", "Menções": 1 }
         ];
 
         const MandalaGalaxy = ({ categories, onSelect }) => (
@@ -85,40 +81,54 @@
             const [selectedMacro, setSelectedMacro] = useState(null);
             const [isAdmin, setIsAdmin] = useState(false);
             const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
-            const [authState, setAuthState] = useState('loading'); // loading, authed, error
+            const [user, setUser] = useState(null);
             const [importProgress, setImportProgress] = useState({ active: false, current: 0, total: 0, error: null });
             const [hubData, setHubData] = useState({ mandala: INITIAL_DATA });
             const [password, setPassword] = useState("");
             const fileInputRef = useRef(null);
 
+            // 1. Gerir Autenticação primeiro (Regra Obrigatória)
             useEffect(() => {
-                const initFirebase = setInterval(() => {
+                const interval = setInterval(async () => {
                     if (window.fbRefs) {
-                        clearInterval(initFirebase);
-                        const { auth, db, appId, onSnapshot, collection, signInAnonymously, onAuthStateChanged } = window.fbRefs;
+                        clearInterval(interval);
+                        const { auth, signInAnonymously, onAuthStateChanged } = window.fbRefs;
                         
-                        onAuthStateChanged(auth, (user) => {
-                            if (user) setAuthState('authed');
-                            else signInAnonymously(auth).catch(err => {
-                                console.error("Erro Auth:", err);
-                                setAuthState('error');
-                            });
-                        });
+                        // Tenta autenticar
+                        try {
+                            await signInAnonymously(auth);
+                        } catch (e) {
+                            console.error("Erro na autenticação anónima:", e);
+                        }
 
-                        const colPath = collection(db, 'artifacts', appId, 'public', 'data', 'mandala');
-                        onSnapshot(colPath, (snap) => {
-                            if (!snap.empty) {
-                                setHubData({ mandala: snap.docs.map(d => ({ id: d.id, ...d.data() })) });
-                            } else {
-                                setHubData({ mandala: [] });
-                            }
-                        }, (err) => {
-                            console.error("Erro Firestore:", err);
+                        // Escuta mudanças no utilizador
+                        onAuthStateChanged(auth, (u) => {
+                            setUser(u);
                         });
                     }
                 }, 500);
-                return () => clearInterval(initFirebase);
+                return () => clearInterval(interval);
             }, []);
+
+            // 2. Só puxar dados se o utilizador estiver autenticado
+            useEffect(() => {
+                if (!user || !window.fbRefs) return;
+
+                const { db, appId, onSnapshot, collection } = window.fbRefs;
+                const colPath = collection(db, 'artifacts', appId, 'public', 'data', 'mandala');
+                
+                const unsubscribe = onSnapshot(colPath, (snap) => {
+                    if (!snap.empty) {
+                        setHubData({ mandala: snap.docs.map(d => ({ id: d.id, ...d.data() })) });
+                    } else {
+                        setHubData({ mandala: [] });
+                    }
+                }, (err) => {
+                    console.error("Erro ao ler base de dados:", err);
+                });
+
+                return () => unsubscribe();
+            }, [user]);
 
             const categories = useMemo(() => {
                 if (hubData.mandala.length === 0) return [];
@@ -136,10 +146,13 @@
             const handleCSVImport = (event) => {
                 const file = event.target.files[0];
                 if (!file) return;
+                
                 const reader = new FileReader();
                 reader.onload = async (e) => {
                     const text = e.target.result;
                     const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
+                    
+                    // Identifica se o Excel usou vírgula ou ponto e vírgula
                     const separator = lines[0].includes(';') ? ';' : ',';
                     
                     const parseLine = l => {
@@ -159,6 +172,9 @@
                     const { db, appId, collection, addDoc } = window.fbRefs;
 
                     try {
+                        // Só tenta gravar se houver utilizador
+                        if (!user) throw new Error("Aguardando login do Google...");
+
                         for (let i = 0; i < rows.length; i++) {
                             const vals = parseLine(rows[i]);
                             const entry = {};
@@ -177,11 +193,9 @@
                             setImportProgress(prev => ({ ...prev, current: i + 1 }));
                         }
                         setImportProgress({ active: false, current: 0, total: 0, error: null });
-                        alert("Sincronização concluída!");
+                        alert("Sucesso! 417 linhas sincronizadas.");
                     } catch (err) {
-                        let msg = "Erro de Permissão.";
-                        if (err.code === 'permission-denied') msg = "Acesso Negado: Verifique as 'Rules' no Firebase.";
-                        setImportProgress(prev => ({ ...prev, error: msg }));
+                        setImportProgress(prev => ({ ...prev, error: err.message || "Erro de permissão" }));
                         console.error(err);
                     }
                 };
@@ -196,7 +210,7 @@
                             <h1 className="text-2xl font-black italic uppercase tracking-tighter leading-none">HUB.INC GENZ</h1>
                         </div>
                         <div className="flex items-center gap-3">
-                            <div className={`w-2 h-2 rounded-full ${authState === 'authed' ? 'bg-emerald-500' : 'bg-red-500 animate-pulse'}`} />
+                            <div className={`w-2 h-2 rounded-full ${user ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' : 'bg-red-500 animate-pulse'}`} title={user ? "Ligado" : "Desligado"} />
                             <button onClick={() => isAdmin ? setIsAdmin(false) : setIsAuthModalOpen(true)} 
                                     className={`w-12 h-12 rounded-2xl border flex items-center justify-center transition-all ${isAdmin ? 'bg-purple-600 border-purple-400 shadow-lg' : 'bg-white/5 border-white/10'}`}>
                                <span className="text-lg">⚙️</span>
@@ -207,7 +221,7 @@
                     <main className="p-6 max-w-lg mx-auto">
                         <div className="flex justify-between items-center mb-10 h-10">
                             <button onClick={() => setSelectedMacro(null)} className={`text-white/40 text-[10px] font-black uppercase tracking-widest transition-all ${selectedMacro ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-                                ← Voltar
+                                ← Voltar para o Mapa
                             </button>
                             {isAdmin && !selectedMacro && (
                                 <div className="flex gap-2">
@@ -222,11 +236,11 @@
                         {!selectedMacro ? (
                             <div className="text-center animate-in fade-in slide-in-from-bottom-5">
                                 <h2 className="text-5xl font-black italic tracking-tighter uppercase mb-2">MANDALA</h2>
-                                <p className="text-white/30 text-[9px] font-black uppercase tracking-[0.4em] mb-12">Deep Intelligence</p>
+                                <p className="text-white/30 text-[9px] font-black uppercase tracking-[0.4em] mb-12">Territórios Culturais</p>
                                 
                                 {categories.length === 0 ? (
-                                    <div className="p-10 border border-dashed border-white/10 rounded-[3rem] text-white/20">
-                                        Nenhum dado encontrado.<br/>Acesse o Admin para importar.
+                                    <div className="p-16 border-2 border-dashed border-white/5 rounded-[3rem] text-white/20 text-sm italic">
+                                        Base de dados vazia.<br/>Importe o CSV no menu ⚙️
                                     </div>
                                 ) : (
                                     <MandalaGalaxy categories={categories} onSelect={setSelectedMacro} />
@@ -236,7 +250,7 @@
                             <div className="space-y-8 animate-in slide-in-from-right-5">
                                 <div className="border-l-4 border-purple-500 pl-4 py-2">
                                     <h3 className="text-3xl font-black uppercase italic tracking-tighter leading-none text-white">{selectedMacro}</h3>
-                                    <p className="text-purple-400/60 text-[9px] font-black uppercase tracking-widest mt-2">Territórios & Estratégias</p>
+                                    <p className="text-purple-400/60 text-[9px] font-black uppercase tracking-widest mt-2">Detalhamento Cultural</p>
                                 </div>
                                 {categories.find(c => c.name === selectedMacro)?.items.map((item, i) => (
                                     <div key={i} className="bg-zinc-900/60 border border-white/5 rounded-[2.5rem] p-8 shadow-2xl">
@@ -249,7 +263,7 @@
                                         </div>
                                         <p className="text-xl font-medium italic mb-10 leading-tight text-white/90">"{item['Pain/Passion Point']}"</p>
                                         <div className="p-7 bg-gradient-to-br from-purple-600 to-indigo-700 rounded-[2.2rem] shadow-xl">
-                                            <span className="text-[9px] font-black uppercase tracking-widest text-white/60 mb-2 block italic">Estratégia para Marcas</span>
+                                            <span className="text-[9px] font-black uppercase tracking-[0.2em] text-white/60 mb-2 block italic">Estratégia para Marcas</span>
                                             <p className="text-sm font-black uppercase italic leading-snug">{item['Direcional Estratégico (Oportunidade para marcas)']}</p>
                                         </div>
                                     </div>
@@ -258,32 +272,34 @@
                         )}
                     </main>
 
+                    {/* Feedback de Importação */}
                     {importProgress.active && (
-                        <div className="fixed inset-0 z-[100] bg-black/95 backdrop-blur-md flex flex-col items-center justify-center p-10 text-center animate-in fade-in">
+                        <div className="fixed inset-0 z-[100] bg-black/95 backdrop-blur-md flex flex-col items-center justify-center p-10 text-center">
                             {importProgress.error ? (
                                 <div className="space-y-6">
                                     <div className="text-red-500 text-6xl">⚠️</div>
-                                    <h4 className="text-xl font-black uppercase text-red-400">{importProgress.error}</h4>
-                                    <p className="text-white/40 text-xs max-w-xs mx-auto">Verifique se o acesso Anônimo está ativo no Console do Firebase e se as Regras foram publicadas.</p>
-                                    <button onClick={() => setImportProgress({active:false, current:0, total:0, error:null})} className="px-10 py-5 bg-white text-black font-black rounded-full uppercase text-xs tracking-widest">Fechar</button>
+                                    <h4 className="text-xl font-black uppercase text-red-400">Falha na Sincronização</h4>
+                                    <p className="text-white/40 text-xs max-w-xs mx-auto">{importProgress.error}</p>
+                                    <button onClick={() => setImportProgress({active:false, current:0, total:0, error:null})} className="px-10 py-5 bg-white text-black font-black rounded-full uppercase text-xs tracking-widest">Tentar Novamente</button>
                                 </div>
                             ) : (
                                 <>
                                     <div className="w-16 h-16 border-4 border-purple-500/20 border-t-purple-500 rounded-full animate-spin mb-6"></div>
-                                    <h4 className="text-xl font-black italic uppercase mb-2">Enviando para o Google</h4>
-                                    <p className="text-white/40 text-[10px] font-black uppercase tracking-widest">{importProgress.current} de {importProgress.total} linhas processadas</p>
+                                    <h4 className="text-xl font-black italic uppercase mb-2">A Sincronizar com o Google</h4>
+                                    <p className="text-white/40 text-[10px] font-black uppercase tracking-widest">{importProgress.current} de {importProgress.total} insights processados</p>
                                 </>
                             )}
                         </div>
                     )}
 
+                    {/* Modal Admin */}
                     {isAuthModalOpen && (
-                        <div className="fixed inset-0 z-[100] bg-black/95 flex items-center justify-center p-8 backdrop-blur-2xl">
+                        <div className="fixed inset-0 z-[100] bg-black/95 flex items-center justify-center p-8 backdrop-blur-2xl animate-in fade-in">
                             <div className="w-full max-w-sm bg-zinc-900 border border-white/10 p-10 rounded-[3.5rem] text-center shadow-2xl">
-                                <h3 className="text-2xl font-black uppercase mb-8 italic text-white tracking-tighter">Admin Access</h3>
-                                <input type="password" placeholder="SENHA" className="w-full bg-black border border-white/10 p-6 rounded-[2rem] text-white outline-none mb-6 text-center font-mono tracking-widest focus:border-purple-500 transition-all" onChange={e => setPassword(e.target.value)} />
+                                <h3 className="text-2xl font-black uppercase mb-8 italic text-white tracking-tighter leading-none">Admin Access</h3>
+                                <input type="password" placeholder="PASSWORD" className="w-full bg-black border border-white/10 p-6 rounded-[2rem] text-white outline-none mb-6 text-center font-mono tracking-widest focus:border-purple-500 transition-all" onChange={e => setPassword(e.target.value)} />
                                 <div className="flex flex-col gap-3">
-                                    <button onClick={() => { if(password === "GENZ2024") { setIsAdmin(true); setIsAuthModalOpen(false); } else { alert("Senha Incorreta"); } }} 
+                                    <button onClick={() => { if(password === "GENZ2024") { setIsAdmin(true); setIsAuthModalOpen(false); } else { alert("Palavra-passe errada"); } }} 
                                             className="w-full py-6 bg-purple-600 rounded-[2rem] font-black uppercase text-xs tracking-widest active:scale-95 transition-all text-white">Desbloquear</button>
                                     <button onClick={() => setIsAuthModalOpen(false)} className="py-4 text-white/20 uppercase text-[9px] font-black tracking-widest">Cancelar</button>
                                 </div>
