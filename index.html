@@ -23,7 +23,7 @@
     <!-- Inicialização Robusta do Firebase -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-        import { getFirestore, collection, onSnapshot, doc, addDoc, deleteDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+        import { getFirestore, collection, onSnapshot, doc, addDoc, deleteDoc, writeBatch } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
 
         const firebaseConfig = {
@@ -36,22 +36,18 @@
             measurementId: "G-D03RK7D08V"
         };
 
-        try {
-            const app = initializeApp(firebaseConfig);
-            const auth = getAuth(app);
-            const db = getFirestore(app);
-            const appId = 'hubinc-genz';
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = 'hubinc-genz';
 
-            window.fbRefs = { 
-                db, auth, collection, onSnapshot, addDoc, deleteDoc, 
-                signInAnonymously, onAuthStateChanged, appId 
-            };
-        } catch (e) {
-            console.error("Erro ao inicializar Firebase:", e);
-        }
+        window.fbRefs = { 
+            db, auth, collection, onSnapshot, addDoc, deleteDoc, writeBatch,
+            signInAnonymously, onAuthStateChanged, appId, doc
+        };
     </script>
 
-    <!-- Aplicação React com Tratamento de Erros -->
+    <!-- Aplicação React com Sincronização em Lote -->
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef } = React;
 
@@ -81,12 +77,11 @@
             const [isAdmin, setIsAdmin] = useState(false);
             const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
             const [user, setUser] = useState(null);
-            const [importProgress, setImportProgress] = useState({ active: false, current: 0, total: 0, error: null });
+            const [importProgress, setImportProgress] = useState({ active: false, status: 'idle', current: 0, total: 0, error: null });
             const [hubData, setHubData] = useState({ mandala: [] });
             const [password, setPassword] = useState("");
             const fileInputRef = useRef(null);
 
-            // Sincronização de Auth e Dados
             useEffect(() => {
                 const interval = setInterval(async () => {
                     if (window.fbRefs) {
@@ -103,7 +98,7 @@
                             }
                         });
 
-                        signInAnonymously(auth).catch(err => console.error("Erro Login:", err));
+                        signInAnonymously(auth).catch(err => console.error("Erro Auth:", err));
                     }
                 }, 500);
                 return () => clearInterval(interval);
@@ -129,51 +124,50 @@
                 reader.onload = async (e) => {
                     const text = e.target.result;
                     const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
-                    const separator = lines[0].includes(';') ? ';' : ',';
                     
                     const parseLine = l => {
                         const r = []; let c = '', q = false;
                         for (let i = 0; i < l.length; i++) {
                             if (l[i] === '"') q = !q;
-                            else if (l[i] === separator && !q) { r.push(c.trim()); c = ''; }
+                            else if ((l[i] === ',' || l[i] === ';') && !q) { r.push(c.trim()); c = ''; }
                             else c += l[i];
                         }
                         r.push(c.trim()); return r;
                     };
 
-                    // Limpa cabeçalhos de caracteres invisíveis (BOM)
                     const headers = parseLine(lines[0]).map(h => h.replace(/[^\w\s/&()áéíóúâêîôûàèìòùãõç-]/gi, '').trim());
                     const rows = lines.slice(1);
                     
-                    setImportProgress({ active: true, current: 0, total: rows.length, error: null });
-                    const { db, appId, collection, addDoc } = window.fbRefs;
+                    setImportProgress({ active: true, status: 'sending', current: 0, total: rows.length, error: null });
+                    const { db, appId, collection, writeBatch, doc } = window.fbRefs;
 
                     try {
+                        const batch = writeBatch(db);
+                        const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'mandala');
+
                         for (let i = 0; i < rows.length; i++) {
                             const vals = parseLine(rows[i]);
                             const entry = {};
                             headers.forEach((h, idx) => {
                                 let val = vals[idx] ? vals[idx].replace(/^"|"$/g, '').trim() : '';
-                                if (h === 'Menções') {
-                                    val = parseInt(String(val).replace(/\D/g, '')) || 0;
-                                }
+                                if (h === 'Menções') val = parseInt(String(val).replace(/\D/g, '')) || 0;
                                 entry[h] = val;
                             });
 
-                            // Validação mínima para evitar gravar linhas vazias
                             if (entry['Macroterritório'] && entry['Pain/Passion Point']) {
-                                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'mandala'), { 
-                                    ...entry, 
-                                    updatedAt: new Date().toISOString() 
-                                });
+                                const newDocRef = doc(colRef);
+                                batch.set(newDocRef, { ...entry, updatedAt: new Date().toISOString() });
                             }
                             setImportProgress(prev => ({ ...prev, current: i + 1 }));
                         }
-                        setImportProgress({ active: false, current: 0, total: 0, error: null });
-                        alert("Sucesso! O HUB foi alimentado.");
+
+                        // Envio Final em Lote (Super Rápido)
+                        await batch.commit();
+                        setImportProgress({ active: false, status: 'success', current: rows.length, total: rows.length, error: null });
+                        alert("HUB Alimentado com Sucesso! 🚀");
                     } catch (err) {
                         console.error(err);
-                        setImportProgress(prev => ({ ...prev, error: "Erro de Permissão: " + err.message }));
+                        setImportProgress(prev => ({ ...prev, error: "Erro: " + err.message }));
                     }
                 };
                 reader.readAsText(file);
@@ -187,7 +181,7 @@
                             <h1 className="text-2xl font-black italic uppercase tracking-tighter leading-none">HUB.INC GENZ</h1>
                         </div>
                         <div className="flex items-center gap-3">
-                            <div className={`w-2 h-2 rounded-full ${user ? 'bg-emerald-500' : 'bg-red-500 animate-pulse'}`} />
+                            <div className={`w-2 h-2 rounded-full ${user ? 'bg-emerald-500 shadow-[0_0_10px_#10b981]' : 'bg-red-500 animate-pulse'}`} />
                             <button onClick={() => isAdmin ? setIsAdmin(false) : setIsAuthModalOpen(true)} 
                                     className={`w-12 h-12 rounded-2xl border flex items-center justify-center transition-all ${isAdmin ? 'bg-purple-600 border-purple-400 shadow-lg' : 'bg-white/5 border-white/10'}`}>
                                <span className="text-lg">⚙️</span>
@@ -198,7 +192,7 @@
                     <main className="p-6 max-w-lg mx-auto">
                         <div className="flex justify-between items-center mb-10 h-10">
                             <button onClick={() => setSelectedMacro(null)} className={`text-white/40 text-[10px] font-black uppercase tracking-widest transition-all ${selectedMacro ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-                                ← Voltar para o Mapa
+                                ← Voltar
                             </button>
                             {isAdmin && !selectedMacro && (
                                 <div className="flex gap-2">
@@ -213,11 +207,11 @@
                         {!selectedMacro ? (
                             <div className="text-center animate-in fade-in slide-in-from-bottom-5">
                                 <h2 className="text-5xl font-black italic tracking-tighter uppercase mb-2">MANDALA</h2>
-                                <p className="text-white/30 text-[9px] font-black uppercase tracking-[0.4em] mb-12">Territórios de Inteligência</p>
+                                <p className="text-white/30 text-[9px] font-black uppercase tracking-[0.4em] mb-12">Inteligência Estratégica</p>
                                 
                                 {categories.length === 0 ? (
                                     <div className="p-20 border-2 border-dashed border-white/5 rounded-[3rem] text-white/20 text-sm italic">
-                                        Aguardando dados...<br/>Importe o CSV no menu ⚙️
+                                        Aguardando dados...<br/>Use o botão Importar no menu Admin.
                                     </div>
                                 ) : (
                                     <MandalaGalaxy categories={categories} onSelect={setSelectedMacro} />
@@ -227,7 +221,7 @@
                             <div className="space-y-8 animate-in slide-in-from-right-5">
                                 <div className="border-l-4 border-purple-500 pl-4 py-2">
                                     <h3 className="text-3xl font-black uppercase italic tracking-tighter leading-none text-white">{selectedMacro}</h3>
-                                    <p className="text-purple-400/60 text-[9px] font-black uppercase tracking-widest mt-2">Detalhamento Cultural</p>
+                                    <p className="text-purple-400/60 text-[9px] font-black uppercase tracking-widest mt-2">Território Detalhado</p>
                                 </div>
                                 {categories.find(c => c.name === selectedMacro)?.items.map((item, i) => (
                                     <div key={i} className="bg-zinc-900/60 border border-white/5 rounded-[2.5rem] p-8 shadow-2xl relative overflow-hidden">
@@ -240,8 +234,8 @@
                                         </div>
                                         <p className="text-xl font-medium italic mb-10 leading-tight text-white/90">"{item['Pain/Passion Point']}"</p>
                                         <div className="p-7 bg-gradient-to-br from-purple-600 to-indigo-700 rounded-[2.2rem] shadow-xl">
-                                            <span className="text-[9px] font-black uppercase tracking-[0.2em] text-white/60 mb-2 block italic">Estratégia para Marcas</span>
-                                            <p className="text-sm font-black uppercase italic leading-snug">{item['Direcional Estratégico (Oportunidade para marcas)']}</p>
+                                            <span className="text-[9px] font-black uppercase tracking-[0.2em] text-white/60 mb-2 block italic text-center">Recomendação Estratégica</span>
+                                            <p className="text-sm font-black uppercase italic leading-snug text-center">{item['Direcional Estratégico (Oportunidade para marcas)']}</p>
                                         </div>
                                     </div>
                                 ))}
@@ -255,15 +249,15 @@
                             {importProgress.error ? (
                                 <div className="space-y-6">
                                     <div className="text-red-500 text-6xl">⚠️</div>
-                                    <h4 className="text-xl font-black uppercase text-red-400">Falha Crítica</h4>
+                                    <h4 className="text-xl font-black uppercase text-red-400">Falha na Gravação</h4>
                                     <p className="text-white/40 text-xs max-w-xs mx-auto">{importProgress.error}</p>
-                                    <button onClick={() => setImportProgress({active:false, current:0, total:0, error:null})} className="px-10 py-5 bg-white text-black font-black rounded-full uppercase text-xs tracking-widest">Fechar e Revisar</button>
+                                    <button onClick={() => setImportProgress({active:false, current:0, total:0, error:null})} className="px-10 py-5 bg-white text-black font-black rounded-full uppercase text-xs tracking-widest">Fechar</button>
                                 </div>
                             ) : (
                                 <>
                                     <div className="w-16 h-16 border-4 border-purple-500/20 border-t-purple-500 rounded-full animate-spin mb-6"></div>
-                                    <h4 className="text-xl font-black italic uppercase mb-2">Sincronizando com o Google</h4>
-                                    <p className="text-white/40 text-[10px] font-black uppercase tracking-widest">{importProgress.current} de {importProgress.total} linhas processadas</p>
+                                    <h4 className="text-xl font-black italic uppercase mb-2">Enviando Lote de Inteligência</h4>
+                                    <p className="text-white/40 text-[10px] font-black uppercase tracking-widest">A preparar {importProgress.current} de {importProgress.total} insights</p>
                                 </>
                             )}
                         </div>
@@ -271,13 +265,13 @@
 
                     {/* Modal Admin */}
                     {isAuthModalOpen && (
-                        <div className="fixed inset-0 z-[100] bg-black/95 flex items-center justify-center p-8 backdrop-blur-2xl animate-in fade-in">
+                        <div className="fixed inset-0 z-[100] bg-black/95 flex items-center justify-center p-8 backdrop-blur-2xl">
                             <div className="w-full max-w-sm bg-zinc-900 border border-white/10 p-10 rounded-[3.5rem] text-center shadow-2xl">
-                                <h3 className="text-2xl font-black uppercase mb-8 italic text-white tracking-tighter">Admin Access</h3>
-                                <input type="password" placeholder="PASSWORD" className="w-full bg-black border border-white/10 p-6 rounded-[2rem] text-white outline-none mb-6 text-center font-mono tracking-widest focus:border-purple-500 transition-all" onChange={e => setPassword(e.target.value)} />
+                                <h3 className="text-2xl font-black uppercase mb-8 italic text-white tracking-tighter">Acesso Restrito</h3>
+                                <input type="password" placeholder="SENHA" className="w-full bg-black border border-white/10 p-6 rounded-[2rem] text-white outline-none mb-6 text-center font-mono tracking-widest focus:border-purple-500 transition-all" onChange={e => setPassword(e.target.value)} />
                                 <div className="flex flex-col gap-3">
                                     <button onClick={() => { if(password === "GENZ2024") { setIsAdmin(true); setIsAuthModalOpen(false); } else { alert("Senha Incorreta"); } }} 
-                                            className="w-full py-6 bg-purple-600 rounded-[2rem] font-black uppercase text-xs tracking-widest active:scale-95 transition-all text-white">Desbloquear</button>
+                                            className="w-full py-6 bg-purple-600 rounded-[2rem] font-black uppercase text-xs tracking-widest active:scale-95 transition-all text-white shadow-lg">Desbloquear</button>
                                     <button onClick={() => setIsAuthModalOpen(false)} className="py-4 text-white/20 uppercase text-[9px] font-black tracking-widest">Cancelar</button>
                                 </div>
                             </div>
